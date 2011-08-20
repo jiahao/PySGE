@@ -1,8 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import argparse
+"""A helper class designed to handle the managment of options and
+positional arguments to qsub and related Grid Engine executables.
 
+Contains functions to write the requested execution string either
+to the command line or to a script file.
+"""
+
+import argparse
 
 class qsubOptions():
     "A data type meant to collect qsub options. See man qsub for information"
@@ -20,7 +26,6 @@ class qsubOptions():
         else:
             prog = 'qrsh'
 
-        #Initialize arguments
 
         #SUPPRESS = If not specified, do not generate variable in namespace
         self.parser = argparse.ArgumentParser(
@@ -1169,6 +1174,8 @@ class qsubOptions():
 
         #END SGE OPTION PARSER
 
+        #Initialize with defaults
+        self.parse('-cwd -V -j y -terse -pe lammpi 1 echo')
 
     
     def parse(self, inputstring = ''):
@@ -1203,9 +1210,17 @@ class qsubOptions():
                 value = ''
             
             if option not in ['command', 'command_args', 'xterm_args']:
-                buf.append(' '.join(['#', '-'+option, str(value)]))
+                if isinstance(value, list):
+                    val = ' '.join(value)
+                else:
+                    val = str(value)
 
-        buf.append(' '.join([self.args.command] + self.args.command_args))
+                buf.append(' '.join(['#', '-'+option, val]))
+
+        args = getattr(self.args, 'command_args', [])
+        args = getattr(self.args, 'xterm_args', args)
+
+        buf.append(' '.join([self.args.command] + args))
 
         if echo: print '\n'.join(buf)
 
@@ -1215,8 +1230,55 @@ class qsubOptions():
 
 
 
+    def execute(self, mode = 'local', path=''):
+        """
+        Executes qsub
+
+        known modes: local - run locally
+                     echo  - echoes out execution string only
+
+        path: path to qsub/... executable: Default = nothing
+        """
+
+        #Form execution string
+
+        import os
+        program = os.path.join(path, self.prog)
+        options = []
+
+        for option, value in self.args.__dict__.items():
+            if value == True:
+                value = ''
+
+            if isinstance(value, list):
+                val = ' '.join(value)
+            else:
+                val = str(value)
+
+            if option not in ['command', 'command_args', 'xterm_args']:
+                options.append('-'+option +' '+val)
+
+        args = getattr(self.args, 'command_args', [])
+        args = getattr(self.args, 'xterm_args', args)
+
+        exestring = ' '.join([program] + options + [self.args.command] + args)
+
+        if mode == 'echo':
+            print exestring
+        elif mode == 'local':
+            import subprocess
+            p = subprocess.Popen(exestring, stdout = subprocess.PIPE, stderr = subprocess.STDOUT, shell = True)
+            print p.stdout.read()
+
+
+
 if __name__ == '__main__':
     print 'Attempting to validate qsub arguments using argparse'
     o = qsubOptions()
     o.parse_args() 
+    o.args.t = '1-1000'
+    print 'I will now print the script'
     o.write_qsub_script('/dev/null', echo = True)
+    print '*'*70
+    print 'I will now print the command line'
+    o.execute(mode = 'echo')
