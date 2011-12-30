@@ -12,9 +12,10 @@ panic location
 /tmp in lieu of $SGE_ROOT
 """
 
-import pwd, os, subprocess
+import logging, pwd, os, re, subprocess, time
 
-from qsubopts import *
+#TODO Use qsubOptions
+from qsubopts import qsubOptions
 
 class _JobData:
     """
@@ -28,7 +29,7 @@ class _JobData:
 
         assert len(tokens) >= 8, 'Not a valid qstat line: '+qstat_job_line
         #Job line must have at least 8 tokens
-        self.job_ID = int(tokens[0])
+        self.id = int(tokens[0])
         self.priority = float(tokens[1])
         self.name = tokens[2]
         self.user = tokens[3]
@@ -66,7 +67,7 @@ class _JobData:
                 else:
                     subjobs, step = x
                     begin, end = subjobs.split('-')
-                    ja_task_ID += range(int(begin),int(end)+1, int(step))
+                    ja_task_ID += range(int(begin), int(end)+1, int(step))
 
         self._ja_tasklist = ja_task_ID
     
@@ -102,21 +103,25 @@ class JobList:
 class SGE:
     """External system call handler for Sun Grid Engine environment."""
 
-    def __init__(self, q = '', path = '', ):
-        if q == '':
-            #@TODO By default, submit to all available queues
+    def __init__(self, q = None, path = '', ):
 
+        logger = logging.getLogger('SGE.__init__')
+
+        if q is None:
+            #No queue specified. By default, submit to all available queues.
             self.cmd_qconf = os.path.join(path, 'qconf')
 
             try:
-                qlist = _exec(self.cmd_qconf+' -sql')
+                qliststr = _exec(self.cmd_qconf+' -sql')
             except IOError:
-                print "Error querying queue configuration"
-                raise IOError
+                error_msg = 'Error querying queue configuration'
+                logger.error(error_msg)
+                raise IOError, error_msg
 
-            self.q = qlist.replace('\n',',')[:-1]
-            #print "Sun Grid Engine handler initialized"
-            #print "Queues detected:",self.q
+            self.q = qliststr.replace('\n',',')[:-1]
+
+            logger.info("""Sun Grid Engine handler initialized
+Queues detected: %s""", self.q)
 
         else:
             self.q = q
@@ -126,74 +131,91 @@ class SGE:
         
 
 
-    def wait(self, jobid, interval = 10, name = None, verbose = True, pbar = None, pbar_mode = None):
+    def wait(self, jobid, interval = 10, name = None, pbar = None,
+             pbar_mode = None):
         """Waits for job running on SGE Grid Engine environment to finish.
 
-        If you are just waiting for one job, this becomes a dumb substitute for the -sync y option
-        which can be specified to qsub.
+        If you are just waiting for one job, this becomes a dumb substitute for
+        the -sync y option which can be specified to qsub.
 
         Inputs:
 
-        jobid - 
-        cmd - The command line to run SGE's qstat. (Default "qstat")
-        interval - How often to check , in seconds. (Default, 10)
-
+        jobid
+        interval - Polling interval of SGE queue, in seconds. (Default: 10)
         """
+
+        logger = logging.getLogger('SGE.wait')
+        
         dowait = True
-        waited = False
         while dowait:
-            p = subprocess.Popen(self.cmd_qstat, shell = True, stdout = subprocess.PIPE)
+            p = subprocess.Popen(self.cmd_qstat, shell = True,
+                                 stdout = subprocess.PIPE)
             pout, _ = p.communicate()
 
             if pbar is not None:
-                verbose = False
-                if pbar_mode == 'quantum':
-                    pbar.update(getstarfleet(getouts()))
-                elif pbar_mode == 'mdrun':
-                    pbar.update(getstep())
+                logger.error('Progress bar handling not implemented')
+                #if pbar_mode == 'quantum':
+                #    pbar.update(getstarfleet(getouts()))
+                #elif pbar_mode == 'mdrun':
+                #    pbar.update(getstep())
 
             dowait = False
             for line in pout.split('\n'):
                 t = line.split()
                 if len(t) >= 5: #Find a line with useful info
-                    #Job must be queued, running or being transferred
-
                     if t[0] == str(jobid) and re.search(t[4], 'qwrt'):
+                        #Job must be queued, running or being transferred
                         dowait = True
                         break
-                    if t[0] == str(jobid) and re.search(t[4], 'acuE'): #Job or host in error state
-                        print "Warning: job", jobid, "in error state"
+                    if t[0] == str(jobid) and re.search(t[4], 'acuE'):
+                        #Job or host in error state
+                        logger.warning('Job %d in error state', str(jobid))
     
             if dowait:
                 time.sleep(interval)
                 waited = True
-                if verbose:
-                    if name == None:
-                        print "\r%s, waiting for jobid %i to finish" % (time.ctime(), int(jobid)),
-                    else:
-                        print "\r%s, waiting for job '%s' (jobid %i) to finish" % (time.ctime(), name, int(jobid)),
-        if waited and verbose:
-            print
+                if name is None:
+                    logger.info("Time %s: waiting for jobid %s to finish",
+                                time.ctime(), str(jobid))
+                else:
+                    logger.info("Time %s: waiting for job '%s' (jobid %s) to \
+finish", time.ctime(), name, str(jobid))
 
 
 
-    def submit(self, job, Verbose = True, array = False, useenvironment = True, usecwd = True, name = None, stdin = None, stdout = None, stderr = None, joinstdouterr = True, nproc = 1, lammpi = True):
+    def submit(self, job, array = False, useenvironment = True, usecwd = True,
+               name = None, stdin = None, stdout = None, stderr = None,
+               joinstdouterr = True, nproc = 1, wait = True, lammpi = True):
         """Submits a job to SGE
 
         Returns jobid as a number"""
-        if Verbose: print "Submitting job:    \x1b[1;91m%-50s\x1b[0m Stdout: %s Stderr: %s" % (job,stdout,stderr)
 
-        #Parameters to qsub specified as the header of the job specified on STDIN
+        logger = logging.getLogger('SGE.submit')
+
+        logger.info("Submitting job:    \x1b[1;91m%-50s\x1b[0m Stdout: %s \
+Stderr: %s", job, stdout, stderr)
+
+        #Parameters to qsub specified as the header of the job specified on
+        #STDIN
         lamstring = lammpi and " -pe lammpi %d" % nproc or ""
         qsuboptslist = ['-cwd -V ', lamstring]
 
-        if name   != None: qsuboptslist.append('-N '+name)
-        if stdin  != None: qsuboptslist.append('-i '+stdin)
-        if stdout != None: qsuboptslist.append('-o '+stdout)
-        if stderr != None: qsuboptslist.append('-e '+stderr)
-        if joinstdouterr:  qsuboptslist.append('-j')
-        if usecwd:         qsuboptslist.append('-cwd')
-        if useenvironment: qsuboptslist.append('-V')
+        if name   != None: 
+            qsuboptslist.append('-N '+name)
+        if stdin  != None:
+            qsuboptslist.append('-i '+stdin)
+        if stdout != None: 
+            qsuboptslist.append('-o '+stdout)
+        if stderr != None: 
+            qsuboptslist.append('-e '+stderr)
+        if joinstdouterr:  
+            qsuboptslist.append('-j')
+        if wait:
+            qsuboptslist.append('-sync y')
+        if usecwd:         
+            qsuboptslist.append('-cwd')
+        if useenvironment:
+            qsuboptslist.append('-V')
         if array != False:
             try:
                 n = int(array[0])
@@ -216,24 +238,24 @@ class SGE:
 
         qsubopts = ' '.join(qsuboptslist)
 
-        pout = _exec(self.cmd_qsub, stdin = qsubopts + '\n' + job, print_command = False)
-
-##         p = subprocess.Popen(self.cmd_qsub, shell = True, stdin = subprocess.PIPE, stdout = subprocess.PIPE, stderr = subprocess.STDOUT)
-##         pout, _ = p.communicate(qsubopts + '\n' + job)
+        pout = _exec(self.cmd_qsub, stdin = qsubopts + '\n' + job,
+                     print_command = False)
 
         try:
-            #Next to last line should be "Your job 1389 (name) has been submitted"
+            #Next to last line should be
+            #"Your job 1389 (name) has been submitted"
             #parse for job id
             jobid = int(pout.split('\n')[-2].split()[2])
             return jobid
         except (ValueError, IndexError, AttributeError), e:
-            print "Error submitting SGE job"
-            print "Job submitted was"
-            print qsubopts
-            print job
-            print "Output was"
-            print pout
-            raise e     
+            error_msg = """Error submitting SGE job:
+%s
+%s
+
+Output was:
+%s""" % (qsubopts, job, pout)
+            logger.error(error_msg)
+            raise e
 
 
 
@@ -245,39 +267,86 @@ class SGE:
             qstat - path to qstat binary (Default = 'qstat')
         """
 
-        p = subprocess.Popen(self.cmd_qstat + " -u " + user, shell = True, stdout = subprocess.PIPE)
+        p = subprocess.Popen(self.cmd_qstat + " -u " + user, shell = True,
+                             stdout = subprocess.PIPE)
         qstat_output, _ = p.communicate()
         joblist = JobList(qstat_output)
         return [job for job in joblist if job.user == user]
 
-    def run_job(self, command, name = 'default', logfnm = 'default.log', wait = True):
-        jobid = self.submit(command, name = name, stdout = logfnm, stderr = logfnm)
-        if wait:
-            self.wait(jobid, verbose = True)
+
+    def run_job(self, command, name = 'default', logfnm = 'default.log',
+                wait = True):
+        """Run job on SGE with piped logging."""
+        jobid = self.submit(command, name = name, stdout = logfnm,
+                            stderr = logfnm, wait = wait)
+
+    def get_job_data(self, jobid):
+        output = _exec(' '.join([self.cmd_qstat, '-j', str(jobid)]))
+        
+        if 'Following jobs do not exist' in output:
+            return None
+        
+        data = dict()
+        for line in output.split('\n')[1:]:
+            t = line.split()
+            if len(t) > 1 and t[0][-1] == ':':
+                data[t[0][:-1]] = t[1]
+       
+        return data
+            
+    def get_queue_instance_status(self):
+        """
+        Get loads for each queue instance
+        """
+        output = _exec(' '.join([self.cmd_qstat, '-f']))
+       
+        data = []
+        for line in output.split('\n')[1:]:
+            t = line.split()
+            if len(t) != 5:
+                continue
+                
+            nodename = t[0].split('@')[1].split('.')[0]
+            maxslots = int(t[2].split('/')[2])
+            load = float(t[3])
+            
+            data.append({'name':nodename, 'maxslots':maxslots, 'load':load})
+       
+        return data
 
 
+def _exec(command, print_to_screen = False, logfnm = None, stdin = '',
+          print_command = False):
 
-def _exec(command, print_to_screen = False, logfnm = None, stdin = None, print_command = False, **kwargs):
     """
     Runs command line using subprocess, optionally returning stdout
     """
+    logger = logging.getLogger('_exec')
+
     print_to_file = (logfnm != None)
+
     if print_to_file:
-        f = open(logfnm,'a')
+        f = open(logfnm, 'a')
+
     if print_command:
-        print "Executing process: \x1b[1;92m%-50s\x1b[0m Logfile: %s" % (command, logfnm)
+        logger.info("Executing process: \x1b[1;92m%-50s\x1b[0m Logfile: %s",
+                    command, logfnm)
         if print_to_file:
             print >> f, "Executing process: %s" % command
-    if stdin == None:
-        p = subprocess.Popen(command, shell=True, stdout = subprocess.PIPE, stderr = subprocess.STDOUT)
-        Output, _ = p.communicate()
-    else:
-        p = subprocess.Popen(command, shell=True, stdin = subprocess.PIPE, stdout = subprocess.PIPE, stderr = subprocess.STDOUT)
-        Output, _ = p.communicate(stdin)
+
+    p = subprocess.Popen(command, shell=True, stdin = subprocess.PIPE,
+                         stdout = subprocess.PIPE,
+                         stderr = subprocess.STDOUT)
+
+    Output, _ = p.communicate(stdin)
+
+    logger.info('Output of command is:\n%s', Output)
+
     if print_to_screen:
         print Output
+
     if logfnm != None:
         f.write(Output)
         f.close()
+
     return Output
- 
