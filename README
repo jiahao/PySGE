@@ -1,0 +1,25 @@
+About
+-----
+These files provide low level routines to interface Python code with a
+Grid Engine-compatible batch job scheduler.
+
+The purpose of this is to abstract away the direct calling of the Grid Engine
+command-line utility *qsub*  from within a Python script, but to provide nonetheless
+a faithful mapping of all its available options.
+
+Example
+-------
+    x = SGE.qsubOptions()
+    x.args.N = 'MyJobName' # Name of Grid Engine job
+    x.args.t = '1-20'      # Define an array job with 20 subjobs
+    x.args.p = '-500'      # Set priority to -500
+    x.args.o = '$JOB_NAME.$JOB_ID.$TASK_ID.stdout.log'.replace('$', '\$') #Set output for each array job
+    x.args.command = 'mycmd'
+    x.args.b = 'y'         # This is a binary file 
+    print '#To submit the array job, run this command:'
+    x.execute(mode = 'echo')
+
+Note
+----
+These routines were tested on Sun Grid Engine 6.2.
+
